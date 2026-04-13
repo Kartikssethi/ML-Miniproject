@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Build/test/cache tools
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local outputs and artifacts
+model_comparison.csv
+archive (2).zip
+*.pkl
+*.joblib
