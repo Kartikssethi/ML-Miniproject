@@ -5,6 +5,8 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+import joblib
+
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
@@ -14,11 +16,12 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 try:
     from xgboost import XGBClassifier
 except ImportError as exc:
-    raise ImportError(
-        "xgboost is required. Install with: pip install xgboost"
-    ) from exc
+    raise ImportError("xgboost is required. Install with: pip install xgboost") from exc
 
 
+# -------------------------
+# LOAD DATA
+# -------------------------
 def load_data(data_dir: Path) -> Dict[str, pd.DataFrame]:
     files = {
         "results": "results.csv",
@@ -37,6 +40,9 @@ def load_data(data_dir: Path) -> Dict[str, pd.DataFrame]:
     return data
 
 
+# -------------------------
+# BUILD DATASET + FEATURES
+# -------------------------
 def build_dataset(data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     results = data["results"].copy()
     races = data["races"][["raceId", "year", "round", "circuitId", "date"]].copy()
@@ -55,9 +61,11 @@ def build_dataset(data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     df = df.dropna(subset=["date", "year", "round", "driverId", "constructorId", "positionOrder"])
     df = df.sort_values(["date", "raceId", "driverId"]).reset_index(drop=True)
 
+    # Target
     df["win"] = (df["positionOrder"] == 1).astype(int)
     df["finish_pos"] = df["positionOrder"]
 
+    # Group stats
     driver_group = df.groupby("driverId", sort=False)
     constructor_group = df.groupby("constructorId", sort=False)
 
@@ -77,6 +85,7 @@ def build_dataset(data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         df["driver_prev_finish_sum"] / df["driver_prior_races"],
         np.nan,
     )
+
     df["constructor_prev_avg_finish"] = np.where(
         df["constructor_prior_races"] > 0,
         df["constructor_prev_finish_sum"] / df["constructor_prior_races"],
@@ -85,41 +94,23 @@ def build_dataset(data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
 
     df["driver_age"] = (df["date"] - df["dob"]).dt.days / 365.25
 
-    # Keep only data that could reasonably be known pre-race.
+    # Features
     feature_cols = [
-        "year",
-        "round",
-        "grid",
-        "quali_position",
-        "driver_age",
-        "driver_prior_races",
-        "driver_prev_wins",
-        "driver_prev_points",
-        "driver_prev_avg_finish",
-        "constructor_prior_races",
-        "constructor_prev_wins",
-        "constructor_prev_points",
-        "constructor_prev_avg_finish",
-        "driverId",
-        "constructorId",
-        "circuitId",
+        "year", "round", "grid", "quali_position", "driver_age",
+        "driver_prior_races", "driver_prev_wins", "driver_prev_points",
+        "driver_prev_avg_finish", "constructor_prior_races",
+        "constructor_prev_wins", "constructor_prev_points",
+        "constructor_prev_avg_finish", "driverId",
+        "constructorId", "circuitId",
     ]
 
     model_df = df[feature_cols + ["win"]].copy()
 
     numeric_cols = [
-        "year",
-        "round",
-        "grid",
-        "quali_position",
-        "driver_age",
-        "driver_prior_races",
-        "driver_prev_wins",
-        "driver_prev_points",
-        "driver_prev_avg_finish",
-        "constructor_prior_races",
-        "constructor_prev_wins",
-        "constructor_prev_points",
+        "year", "round", "grid", "quali_position", "driver_age",
+        "driver_prior_races", "driver_prev_wins", "driver_prev_points",
+        "driver_prev_avg_finish", "constructor_prior_races",
+        "constructor_prev_wins", "constructor_prev_points",
         "constructor_prev_avg_finish",
     ]
 
@@ -136,6 +127,9 @@ def build_dataset(data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     return model_df
 
 
+# -------------------------
+# TRAIN / TEST SPLIT
+# -------------------------
 def time_split(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     max_year = int(df["year"].max())
     split_year = max_year - 2
@@ -151,7 +145,12 @@ def time_split(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     return train_df, test_df
 
 
-def evaluate_model(name: str, model: Pipeline, x_train: pd.DataFrame, y_train: pd.Series, x_test: pd.DataFrame, y_test: pd.Series) -> Dict[str, float]:
+# -------------------------
+# EVALUATION
+# -------------------------
+def evaluate_model(name: str, model: Pipeline,
+                   x_train, y_train, x_test, y_test) -> Dict[str, float]:
+
     model.fit(x_train, y_train)
 
     if name == "Linear Regression":
@@ -177,111 +176,92 @@ def evaluate_model(name: str, model: Pipeline, x_train: pd.DataFrame, y_train: p
     return result
 
 
-def train_and_compare(model_df: pd.DataFrame) -> pd.DataFrame:
+# -------------------------
+# TRAIN + PICK BEST MODEL
+# -------------------------
+def train_and_compare(model_df: pd.DataFrame):
     train_df, test_df = time_split(model_df)
 
-    target_col = "win"
-    y_train = train_df[target_col].astype(int)
-    y_test = test_df[target_col].astype(int)
+    y_train = train_df["win"].astype(int)
+    y_test = test_df["win"].astype(int)
 
-    x_train = train_df.drop(columns=[target_col])
-    x_test = test_df.drop(columns=[target_col])
+    x_train = train_df.drop(columns=["win"])
+    x_test = test_df.drop(columns=["win"])
 
     numeric_features = [
-        "year",
-        "round",
-        "grid",
-        "quali_position",
-        "driver_age",
-        "driver_prior_races",
-        "driver_prev_wins",
-        "driver_prev_points",
-        "driver_prev_avg_finish",
-        "constructor_prior_races",
-        "constructor_prev_wins",
-        "constructor_prev_points",
-        "constructor_prev_avg_finish",
+        "year","round","grid","quali_position","driver_age",
+        "driver_prior_races","driver_prev_wins","driver_prev_points",
+        "driver_prev_avg_finish","constructor_prior_races",
+        "constructor_prev_wins","constructor_prev_points",
+        "constructor_prev_avg_finish"
     ]
+
     categorical_features = ["driverId", "constructorId", "circuitId"]
 
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("num", StandardScaler(), numeric_features),
-            ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_features),
-        ]
-    )
+    preprocessor = ColumnTransformer([
+        ("num", StandardScaler(), numeric_features),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_features),
+    ])
 
-    models: List[Tuple[str, Pipeline]] = [
-        (
-            "Logistic Regression",
-            Pipeline(
-                steps=[
-                    ("preprocessor", preprocessor),
-                    (
-                        "model",
-                        LogisticRegression(
-                            max_iter=2000,
-                            class_weight="balanced",
-                            n_jobs=None,
-                        ),
-                    ),
-                ]
-            ),
-        ),
-        (
-            "XGBoost",
-            Pipeline(
-                steps=[
-                    ("preprocessor", preprocessor),
-                    (
-                        "model",
-                        XGBClassifier(
-                            n_estimators=300,
-                            learning_rate=0.05,
-                            max_depth=6,
-                            subsample=0.9,
-                            colsample_bytree=0.9,
-                            eval_metric="logloss",
-                            random_state=42,
-                        ),
-                    ),
-                ]
-            ),
-        ),
-        (
-            "Linear Regression",
-            Pipeline(
-                steps=[
-                    ("preprocessor", preprocessor),
-                    ("model", LinearRegression()),
-                ]
-            ),
-        ),
+    models = [
+        ("Logistic Regression",
+         Pipeline([("preprocessor", preprocessor),
+                   ("model", LogisticRegression(max_iter=2000, class_weight="balanced"))])),
+
+        ("XGBoost",
+         Pipeline([("preprocessor", preprocessor),
+                   ("model", XGBClassifier(
+                       n_estimators=300,
+                       learning_rate=0.05,
+                       max_depth=6,
+                       subsample=0.9,
+                       colsample_bytree=0.9,
+                       eval_metric="logloss",
+                       random_state=42))])),
+
+        ("Linear Regression",
+         Pipeline([("preprocessor", preprocessor),
+                   ("model", LinearRegression())]))
     ]
 
     results = []
+    best_model = None
+    best_f1 = -1
+
     for name, model in models:
         metrics = evaluate_model(name, model, x_train, y_train, x_test, y_test)
         results.append(metrics)
 
+        if metrics["f1"] > best_f1:
+            best_f1 = metrics["f1"]
+            best_model = model
+
     comparison_df = pd.DataFrame(results).sort_values(by="f1", ascending=False).reset_index(drop=True)
-    return comparison_df
+
+    return comparison_df, best_model
 
 
-def main() -> None:
+# -------------------------
+# MAIN
+# -------------------------
+def main():
     project_root = Path(__file__).resolve().parent
     data_dir = project_root / "archive (2)"
 
     data = load_data(data_dir)
     model_df = build_dataset(data)
-    comparison_df = train_and_compare(model_df)
 
-    output_path = project_root / "model_comparison.csv"
-    comparison_df.to_csv(output_path, index=False)
+    comparison_df, best_model = train_and_compare(model_df)
+
+    # Save comparison
+    comparison_df.to_csv(project_root / "model_comparison.csv", index=False)
+
+    # Save trained model
+    joblib.dump(best_model, project_root / "model.pkl")
 
     print("Model comparison (sorted by F1):")
     print(comparison_df.to_string(index=False))
-    print(f"\nSaved comparison table to: {output_path}")
+    print("\nSaved model as model.pkl")
 
 
 if __name__ == "__main__":
